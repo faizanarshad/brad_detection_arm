@@ -8,13 +8,15 @@ from pathlib import Path
 
 import torch
 
+from text_language import normalize_good_name
 from train_bilstm import BiLSTMClassifier, CharVocab
 
 
 def encode_text(text: str, char2idx: dict[str, int], max_len: int) -> list[int]:
     pad = char2idx["<PAD>"]
     unk = char2idx["<UNK>"]
-    ids = [char2idx.get(ch, unk) for ch in text.strip()[:max_len]]
+    text = normalize_good_name(text)
+    ids = [char2idx.get(ch, unk) for ch in text[:max_len]]
     if len(ids) < max_len:
         ids.extend([pad] * (max_len - len(ids)))
     return ids

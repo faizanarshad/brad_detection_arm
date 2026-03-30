@@ -17,6 +17,10 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
+from text_language import normalize_good_name
+
+TEXT_NORMALIZE_VERSION = "nfc_ws_zwsp_v1"
+
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -121,7 +125,7 @@ def make_sample_weights(y: np.ndarray, num_classes: int) -> torch.Tensor:
 def load_labeled_data(excel_path: Path) -> tuple[pd.DataFrame, np.ndarray, LabelEncoder]:
     df = pd.read_excel(excel_path)
     df = df.dropna(subset=["GOOD_NAME", "ADG_CODE"]).copy()
-    df["GOOD_NAME"] = df["GOOD_NAME"].astype(str).str.strip()
+    df["GOOD_NAME"] = df["GOOD_NAME"].astype(str).map(normalize_good_name)
     df = df[df["GOOD_NAME"].str.len() > 0]
     le = LabelEncoder()
     y = le.fit_transform(df["ADG_CODE"].astype(int).astype(str))
@@ -376,6 +380,7 @@ def main() -> None:
         "dropout": args.dropout,
         "char2idx": vocab.char2idx,
         "classes": label_encoder.classes_.tolist(),
+        "text_normalize": TEXT_NORMALIZE_VERSION,
     }
     history_path = args.out.parent / f"{args.out.stem}.history.json"
     with open(history_path, "w", encoding="utf-8") as f:
