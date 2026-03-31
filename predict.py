@@ -8,11 +8,16 @@ from pathlib import Path
 
 import torch
 
+from fasttext_embeddings import WordVocab
 from text_language import normalize_good_name
-from train_bilstm import BiLSTMClassifier, CharVocab
+from train_bilstm import BiLSTMClassifier, TOKENIZER_WORD_FASTTEXT
 
 
-def encode_text(text: str, char2idx: dict[str, int], max_len: int) -> list[int]:
+def encode_text(text: str, meta: dict) -> list[int]:
+    max_len = meta["max_len"]
+    if meta.get("tokenizer") == TOKENIZER_WORD_FASTTEXT:
+        return WordVocab(word2idx=meta["word2idx"]).encode(text, max_len)
+    char2idx = meta["char2idx"]
     pad = char2idx["<PAD>"]
     unk = char2idx["<UNK>"]
     text = normalize_good_name(text)
@@ -25,9 +30,14 @@ def encode_text(text: str, char2idx: dict[str, int], max_len: int) -> list[int]:
 def load_model(ckpt_path: Path, device: torch.device) -> tuple[BiLSTMClassifier, dict]:
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     meta = ckpt["meta"]
-    char2idx = meta["char2idx"]
-    vocab_size = max(char2idx.values()) + 1
+    tok = meta.get("tokenizer", "char")
     num_classes = len(meta["classes"])
+    if tok == TOKENIZER_WORD_FASTTEXT:
+        word2idx = meta["word2idx"]
+        vocab_size = max(word2idx.values()) + 1
+    else:
+        char2idx = meta["char2idx"]
+        vocab_size = max(char2idx.values()) + 1
     model = BiLSTMClassifier(
         vocab_size=vocab_size,
         num_classes=num_classes,
@@ -35,6 +45,8 @@ def load_model(ckpt_path: Path, device: torch.device) -> tuple[BiLSTMClassifier,
         hidden_dim=meta["hidden_dim"],
         num_layers=meta["num_layers"],
         dropout=meta["dropout"],
+        embedding_weight=None,
+        padding_idx=0,
     )
     model.load_state_dict(ckpt["model_state"])
     model.to(device)
@@ -50,10 +62,8 @@ def predict_one(
     device: torch.device,
     topk: int = 1,
 ) -> list[tuple[str, float]]:
-    max_len = meta["max_len"]
-    char2idx = meta["char2idx"]
     classes = meta["classes"]
-    x = torch.tensor([encode_text(text, char2idx, max_len)], dtype=torch.long, device=device)
+    x = torch.tensor([encode_text(text, meta)], dtype=torch.long, device=device)
     logits = model(x)
     probs = torch.softmax(logits, dim=1)
     k = min(topk, probs.size(1))

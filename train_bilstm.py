@@ -1,5 +1,7 @@
 """
-Train a character-level BiLSTM to predict ADG_CODE from GOOD_NAME (Armenian + mixed text).
+Train a BiLSTM on GOOD_NAME → ADG_CODE.
+
+Default: character-level embeddings. Pass --fasttext-model PATH.cc.hy.300.bin for word-level FastText (optional).
 """
 from __future__ import annotations
 
@@ -12,14 +14,22 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.metrics import f1_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
+from fasttext_embeddings import (
+    WordVocab,
+    build_fasttext_embedding_matrix,
+    load_fasttext_bins,
+)
 from text_language import normalize_good_name
 
 TEXT_NORMALIZE_VERSION = "nfc_ws_zwsp_v1"
+TOKENIZER_CHAR = "char"
+TOKENIZER_WORD_FASTTEXT = "word_fasttext"
 
 
 def set_seed(seed: int) -> None:
@@ -79,9 +89,18 @@ class BiLSTMClassifier(nn.Module):
         hidden_dim: int = 128,
         num_layers: int = 1,
         dropout: float = 0.3,
+        embedding_weight: torch.Tensor | None = None,
+        padding_idx: int = 0,
     ) -> None:
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, emb_dim, padding_idx=CharVocab.PAD)
+        self.padding_idx = padding_idx
+        if embedding_weight is not None:
+            self.embedding = nn.Embedding.from_pretrained(
+                embedding_weight, freeze=False, padding_idx=padding_idx
+            )
+            emb_dim = embedding_weight.size(1)
+        else:
+            self.embedding = nn.Embedding(vocab_size, emb_dim, padding_idx=padding_idx)
         self.lstm = nn.LSTM(
             emb_dim,
             hidden_dim,
@@ -97,7 +116,7 @@ class BiLSTMClassifier(nn.Module):
         emb = self.dropout(self.embedding(x))
         out, _ = self.lstm(emb)
         # Mask padded positions for mean pool
-        mask = (x != CharVocab.PAD).float().unsqueeze(-1)
+        mask = (x != self.padding_idx).float().unsqueeze(-1)
         summed = (out * mask).sum(dim=1)
         lengths = mask.sum(dim=1).clamp(min=1.0)
         pooled = summed / lengths
@@ -120,6 +139,23 @@ def make_sample_weights(y: np.ndarray, num_classes: int) -> torch.Tensor:
     w_class = 1.0 / counts
     sw = w_class[y]
     return torch.from_numpy(sw).double()
+
+
+class FocalLoss(nn.Module):
+    """Cross-entropy modulated by (1-p)^gamma — often helps long-tail classes vs. plain CE."""
+
+    def __init__(self, weight: torch.Tensor | None = None, gamma: float = 2.0) -> None:
+        super().__init__()
+        self.gamma = gamma
+        if weight is not None:
+            self.register_buffer("weight", weight)
+        else:
+            self.weight = None
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        ce = F.cross_entropy(logits, target, weight=self.weight, reduction="none")
+        pt = torch.exp(-ce)
+        return (((1 - pt) ** self.gamma) * ce).mean()
 
 
 def load_labeled_data(excel_path: Path) -> tuple[pd.DataFrame, np.ndarray, LabelEncoder]:
@@ -200,6 +236,7 @@ def metric_for_checkpoint(
     val_acc: float,
     f1_macro: float,
     f1_weighted: float,
+    top3_acc: float,
 ) -> float:
     if best_metric == "acc":
         return val_acc
@@ -207,18 +244,40 @@ def metric_for_checkpoint(
         return f1_macro
     if best_metric == "weighted_f1":
         return f1_weighted
+    if best_metric == "top3":
+        return top3_acc
     raise ValueError(best_metric)
 
 
 def main() -> None:
+    project_dir = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description="BiLSTM ADG_CODE classifier")
     parser.add_argument(
         "--data",
         type=Path,
-        default=Path(__file__).resolve().parent / "brand_task.xlsx",
+        default=project_dir / "brand_task.xlsx",
         help="Path to brand_task.xlsx",
     )
-    parser.add_argument("--max-len", type=int, default=384, help="Max characters per name (truncate)")
+    parser.add_argument(
+        "--char",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--fasttext-model",
+        type=Path,
+        action="append",
+        dest="fasttext_models",
+        default=None,
+        help="If set: word BiLSTM + FastText .bin (pass twice to concat languages, e.g. hy+en). "
+        "Default: character BiLSTM (no FastText).",
+    )
+    parser.add_argument(
+        "--max-len",
+        type=int,
+        default=None,
+        help="Max sequence length: characters (default) or words (with --fasttext-model). Defaults: 384 / 128.",
+    )
     parser.add_argument("--emb-dim", type=int, default=192)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--layers", type=int, default=1)
@@ -228,7 +287,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--val-size", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--out", type=Path, default=Path(__file__).resolve().parent / "bilstm_adg.pt")
+    parser.add_argument("--out", type=Path, default=project_dir / "bilstm_adg.pt")
     parser.add_argument(
         "--no-class-weight",
         action="store_true",
@@ -245,13 +304,38 @@ def main() -> None:
         help="Disable ReduceLROnPlateau on validation metric",
     )
     parser.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=0.0,
+        help="If >0, use focal loss with this gamma (e.g. 2.0). 0 = standard cross-entropy. Often helps imbalanced ADG codes.",
+    )
+    parser.add_argument(
         "--best-metric",
-        choices=("acc", "macro_f1", "weighted_f1"),
-        default="weighted_f1",
-        help="Metric for best checkpoint / LR schedule (default: weighted_f1 balances head & tail classes)",
+        choices=("acc", "macro_f1", "weighted_f1", "top3"),
+        default="top3",
+        help="Metric for best checkpoint / LR schedule. top3 = recall@3 (often more informative than top-1 with 200+ classes).",
+    )
+    parser.add_argument(
+        "--best-metric-legacy",
+        action="store_true",
+        help="Shortcut: set --best-metric weighted_f1 (previous default).",
     )
     parser.add_argument("--early-stopping", type=int, default=0, help="Stop if no improvement for N epochs (0=off)")
     args = parser.parse_args()
+
+    if args.best_metric_legacy:
+        args.best_metric = "weighted_f1"
+
+    use_char = not args.fasttext_models
+    ft_paths_resolved: list[Path] = []
+    if not use_char:
+        ft_paths_resolved = [p.expanduser().resolve() for p in args.fasttext_models]
+    if use_char:
+        max_len = args.max_len if args.max_len is not None else 384
+        tokenizer = TOKENIZER_CHAR
+    else:
+        max_len = args.max_len if args.max_len is not None else 128
+        tokenizer = TOKENIZER_WORD_FASTTEXT
 
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -274,21 +358,33 @@ def main() -> None:
             random_state=args.seed,
         )
     train_texts = [texts[i] for i in idx_train]
-    vocab = CharVocab(train_texts)
+
+    embedding_weight: torch.Tensor | None = None
+    if use_char:
+        vocab = CharVocab(train_texts)
+        emb_dim_effective = args.emb_dim
+    else:
+        ft_models = load_fasttext_bins(ft_paths_resolved)
+        vocab = WordVocab(train_texts)
+        embedding_weight = build_fasttext_embedding_matrix(vocab.word2idx, ft_models)
+        emb_dim_effective = embedding_weight.size(1)
 
     y_train = y[idx_train]
-    train_ds = ProductDataset([texts[i] for i in idx_train], y_train, vocab, args.max_len)
-    val_ds = ProductDataset([texts[i] for i in idx_val], y[idx_val], vocab, args.max_len)
+    train_ds = ProductDataset([texts[i] for i in idx_train], y_train, vocab, max_len)
+    val_ds = ProductDataset([texts[i] for i in idx_val], y[idx_val], vocab, max_len)
 
     num_classes = len(label_encoder.classes_)
     use_class_weight = not args.no_class_weight
     if args.oversample:
         use_class_weight = False
-    class_weights = None
+    class_weights: torch.Tensor | None = None
     if use_class_weight:
         class_weights = compute_class_weights(y_train, num_classes).to(device)
 
-    criterion_train = nn.CrossEntropyLoss(weight=class_weights)
+    if args.focal_gamma and args.focal_gamma > 0:
+        criterion_train = FocalLoss(weight=class_weights, gamma=args.focal_gamma).to(device)
+    else:
+        criterion_train = nn.CrossEntropyLoss(weight=class_weights)
     criterion_eval = nn.CrossEntropyLoss()
 
     if args.oversample:
@@ -302,10 +398,12 @@ def main() -> None:
     model = BiLSTMClassifier(
         vocab_size=vocab.size,
         num_classes=num_classes,
-        emb_dim=args.emb_dim,
+        emb_dim=args.emb_dim if use_char else emb_dim_effective,
         hidden_dim=args.hidden_dim,
         num_layers=args.layers,
         dropout=args.dropout,
+        embedding_weight=embedding_weight,
+        padding_idx=WordVocab.PAD if not use_char else CharVocab.PAD,
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -337,7 +435,9 @@ def main() -> None:
         val_loss, val_acc, f1_macro, f1_weighted, topk_acc = evaluate(
             model, val_loader, criterion_eval, device
         )
-        score = metric_for_checkpoint(args.best_metric, val_acc, f1_macro, f1_weighted)
+        score = metric_for_checkpoint(
+            args.best_metric, val_acc, f1_macro, f1_weighted, topk_acc[3]
+        )
         history["epoch"].append(epoch)
         history["train_loss"].append(tr_loss)
         history["val_loss"].append(val_loss)
@@ -372,16 +472,21 @@ def main() -> None:
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    meta = {
-        "max_len": args.max_len,
-        "emb_dim": args.emb_dim,
+    meta: dict = {
+        "tokenizer": tokenizer,
+        "max_len": max_len,
+        "emb_dim": emb_dim_effective if not use_char else args.emb_dim,
         "hidden_dim": args.hidden_dim,
         "num_layers": args.layers,
         "dropout": args.dropout,
-        "char2idx": vocab.char2idx,
         "classes": label_encoder.classes_.tolist(),
         "text_normalize": TEXT_NORMALIZE_VERSION,
     }
+    if use_char:
+        meta["char2idx"] = vocab.char2idx
+    else:
+        meta["word2idx"] = vocab.word2idx
+        meta["fasttext_model_paths"] = [str(p) for p in ft_paths_resolved]
     history_path = args.out.parent / f"{args.out.stem}.history.json"
     with open(history_path, "w", encoding="utf-8") as f:
         json.dump(history, f, indent=2)

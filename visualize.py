@@ -19,10 +19,12 @@ from sklearn.metrics import (
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 
+from fasttext_embeddings import WordVocab
 from train_bilstm import (
     BiLSTMClassifier,
     CharVocab,
     ProductDataset,
+    TOKENIZER_WORD_FASTTEXT,
     evaluate as evaluate_val,
     load_labeled_data,
 )
@@ -48,9 +50,14 @@ def predict_loader(
 
 def load_model_from_checkpoint(ckpt: dict, device: torch.device) -> tuple[torch.nn.Module, dict]:
     meta = ckpt["meta"]
-    char2idx = meta["char2idx"]
-    vocab_size = max(char2idx.values()) + 1
+    tok = meta.get("tokenizer", "char")
     num_classes = len(meta["classes"])
+    if tok == TOKENIZER_WORD_FASTTEXT:
+        word2idx = meta["word2idx"]
+        vocab_size = max(word2idx.values()) + 1
+    else:
+        char2idx = meta["char2idx"]
+        vocab_size = max(char2idx.values()) + 1
     model = BiLSTMClassifier(
         vocab_size=vocab_size,
         num_classes=num_classes,
@@ -58,6 +65,8 @@ def load_model_from_checkpoint(ckpt: dict, device: torch.device) -> tuple[torch.
         hidden_dim=meta["hidden_dim"],
         num_layers=meta["num_layers"],
         dropout=meta["dropout"],
+        embedding_weight=None,
+        padding_idx=0,
     )
     model.load_state_dict(ckpt["model_state"])
     model.to(device)
@@ -206,7 +215,11 @@ def main() -> None:
         )
 
     train_texts = [texts[i] for i in idx_train]
-    vocab = CharVocab(train_texts)
+    tok = meta.get("tokenizer", "char")
+    if tok == TOKENIZER_WORD_FASTTEXT:
+        vocab = WordVocab(word2idx=meta["word2idx"])
+    else:
+        vocab = CharVocab(train_texts)
     max_len = meta["max_len"]
     val_ds = ProductDataset([texts[i] for i in idx_val], y[idx_val], vocab, max_len)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)

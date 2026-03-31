@@ -4,3 +4,7 @@ __pycache__/
 .DS_Store
 .venv/
 venv/
+# Training outputs
+figures/
+*.history.json
+*.meta.json
