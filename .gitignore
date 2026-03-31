@@ -8,3 +8,5 @@ venv/
 figures/
 *.history.json
 *.meta.json
+train_run.log
+~$*.xlsx

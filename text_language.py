@@ -12,20 +12,53 @@ import unicodedata
 _ARM_MIN, _ARM_MAX = 0x0530, 0x058F
 _ARM_SUP_MIN, _ARM_SUP_MAX = 0xFB10, 0xFB17
 
+# Applied after base cleaning (lowercase, spacing, etc.). Regex → canonical token (underscore).
+# Order: longer / more specific patterns first. Extend here as needed.
+BRAND_CANONICAL_REPLACEMENTS: list[tuple[str, str]] = [
+    (r"\bcoca\s+cola\b", "coca_cola"),
+    (r"\bկոկա\s+կոլա\b", "coca_cola"),
+    (r"\bfanta\b", "fanta"),
+    (r"\bsprite\b", "sprite"),
+]
+
+
+def canonicalize_brands(text: str) -> str:
+    """Map variant spellings to single tokens (e.g. coca cola → coca_cola). Input must already be lowercased."""
+    s = text
+    for pattern, repl in BRAND_CANONICAL_REPLACEMENTS:
+        s = re.sub(pattern, repl, s, flags=re.UNICODE)
+    return s
+
 
 def normalize_good_name(text: str) -> str:
     """
-    Normalize product names for the char BiLSTM:
-    - NFC (canonical composed form for Armenian + combining marks)
+    Mandatory text cleaning before BiLSTM (training and inference must match).
+
+    - Unicode NFC; strip zero-width / BOM noise
+    - Remove Excel escape literals: _x000D_, _x000A_ (case-insensitive)
+    - Remove asterisks *
+    - Replace slash runs (/, //, ///, …) with a space
+    - Replace hyphens with a space (e.g. Coca-Cola → coca cola)
+    - Lowercase (Unicode-aware for Armenian + Latin)
     - Collapse whitespace
-    - Strip zero-width / BOM characters often pasted from Excel or the web
+    - Canonical brand tokens (see BRAND_CANONICAL_REPLACEMENTS), e.g. coca cola → coca_cola
+
+    Example: "Coca-Cola 0.25լ///" → "coca_cola 0.25լ"
     """
     if not text or not isinstance(text, str):
         return ""
     s = unicodedata.normalize("NFC", text)
     for z in ("\u200b", "\u200c", "\u200d", "\ufeff", "\u00ad"):
         s = s.replace(z, "")
+    s = re.sub(r"_x000D_", " ", s, flags=re.I)
+    s = re.sub(r"_x000A_", " ", s, flags=re.I)
+    s = s.replace("\u00b6", " ")
+    s = s.replace("*", "")
+    s = re.sub(r"/+", " ", s)
+    s = s.replace("-", " ")
+    s = s.lower()
     s = re.sub(r"\s+", " ", s).strip()
+    s = canonicalize_brands(s)
     return s
 
 

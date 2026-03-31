@@ -27,7 +27,7 @@ from fasttext_embeddings import (
 )
 from text_language import normalize_good_name
 
-TEXT_NORMALIZE_VERSION = "nfc_ws_zwsp_v1"
+TEXT_NORMALIZE_VERSION = "nfc_lower_ws_slash_star_brand_v3"
 TOKENIZER_CHAR = "char"
 TOKENIZER_WORD_FASTTEXT = "word_fasttext"
 
@@ -462,11 +462,15 @@ def main() -> None:
             f"epoch {epoch:02d}  lr={lr_cur:.2e}  train_loss={tr_loss:.4f}  "
             f"val_loss={val_loss:.4f}  acc={val_acc:.4f}  "
             f"f1_macro={f1_macro:.4f}  f1_w={f1_weighted:.4f}  "
-            f"top3={topk_acc[3]:.4f}  top5={topk_acc[5]:.4f}"
+            f"top3={topk_acc[3]:.4f}  top5={topk_acc[5]:.4f}",
+            flush=True,
         )
 
         if args.early_stopping > 0 and stale >= args.early_stopping:
-            print(f"Early stopping at epoch {epoch} (no improvement {stale} epochs on {args.best_metric})")
+            print(
+                f"Early stopping at epoch {epoch} (no improvement {stale} epochs on {args.best_metric})",
+                flush=True,
+            )
             break
 
     if best_state is not None:
@@ -501,7 +505,7 @@ def main() -> None:
     )
     with open(args.out.with_suffix(".meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
-    print(f"Saved checkpoint to {args.out} (best {args.best_metric}={best_score:.4f})")
+    print(f"Saved checkpoint to {args.out} (best {args.best_metric}={best_score:.4f})", flush=True)
 
 
 if __name__ == "__main__":
