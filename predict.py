@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 
+from clean_brand_task import canonicalize_excel_columns
 from fasttext_embeddings import WordVocab
 from text_language import normalize_good_name
 from train_bilstm import BiLSTMClassifier, TOKENIZER_WORD_FASTTEXT
@@ -36,21 +37,24 @@ def lookup_names_for_code(
     max_examples: int,
     min_count: int = 1,
     keywords_csv: str | None = None,
-) -> tuple[str, list[tuple[str, int]], int, int]:
+) -> tuple[str, list[dict[str, object]], int, int]:
     """
-    Return (normalized_code, pairs, n_rows_for_code, n_rows_after_keyword_filter).
-    If no --keywords, n_rows_after_keyword_filter == n_rows_for_code (before min_count).
+    Return (normalized_code, rows, n_rows_for_code, n_rows_after_keyword_filter).
+    Each row dict: good_name, brand, industry, count.
     """
     target = _normalize_adg_key(code_input.strip())
     if not target:
         return target, [], 0, 0
 
     df = pd.read_excel(excel_path)
+    df = canonicalize_excel_columns(df)
     if "ADG_CODE" not in df.columns or "GOOD_NAME" not in df.columns:
         raise SystemExit(f"Expected columns GOOD_NAME, ADG_CODE in {excel_path}")
 
     df = df.dropna(subset=["GOOD_NAME", "ADG_CODE"]).copy()
     df["GOOD_NAME"] = df["GOOD_NAME"].astype(str).map(normalize_good_name)
+    df["BRAND"] = df["BRAND"].astype(str).map(normalize_good_name)
+    df["INDUSTRY"] = df["INDUSTRY"].astype(str).map(normalize_good_name)
     df = df[df["GOOD_NAME"].str.len() > 0]
     df["_code_key"] = df["ADG_CODE"].map(_normalize_adg_key)
     sub = df[df["_code_key"] == target]
@@ -71,11 +75,19 @@ def lookup_names_for_code(
     if sub.empty:
         return target, [], n_rows, n_after_kw
 
-    counts = sub["GOOD_NAME"].value_counts()
-    pairs: list[tuple[str, int]] = [
-        (str(name), int(cnt)) for name, cnt in counts.items() if int(cnt) >= min_count
-    ]
-    return target, pairs[:max_examples], n_rows, n_after_kw
+    grp = sub.groupby(["GOOD_NAME", "BRAND", "INDUSTRY"], dropna=False).size().reset_index(name="_cnt")
+    grp = grp[grp["_cnt"] >= min_count].sort_values("_cnt", ascending=False).head(max_examples)
+    rows: list[dict[str, object]] = []
+    for _, r in grp.iterrows():
+        rows.append(
+            {
+                "good_name": str(r["GOOD_NAME"]),
+                "brand": str(r["BRAND"]) if pd.notna(r["BRAND"]) else "",
+                "industry": str(r["INDUSTRY"]) if pd.notna(r["INDUSTRY"]) else "",
+                "count": int(r["_cnt"]),
+            }
+        )
+    return target, rows, n_rows, n_after_kw
 
 
 def encode_text(text: str, meta: dict) -> list[int]:
@@ -233,11 +245,21 @@ def main() -> None:
         elif not names:
             print(f"  (no rows after filters)")
         else:
-            for n, cnt in names:
-                if cnt > 1:
-                    print(f"  {n}  [{cnt}×]")
+            has_extra = any((r.get("brand") or r.get("industry")) for r in names)
+            for r in names:
+                gn = r["good_name"]
+                cnt = r["count"]
+                br = r.get("brand") or ""
+                ind = r.get("industry") or ""
+                suf = f"  [{cnt}×]" if cnt > 1 else ""
+                if has_extra and (br or ind):
+                    print(f"  {gn}{suf}")
+                    if br:
+                        print(f"      brand: {br}")
+                    if ind:
+                        print(f"      industry: {ind}")
                 else:
-                    print(f"  {n}")
+                    print(f"  {gn}{suf}")
         return
 
     if not args.checkpoint.is_file():

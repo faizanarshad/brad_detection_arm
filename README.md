@@ -18,6 +18,30 @@ pip install -r requirements.txt
 
 NumPy is pinned below 2.x for compatibility with common PyTorch wheels on older setups.
 
+## Clean the Excel (optional)
+
+`clean_brand_task.py` applies simple ML-oriented cleaning to `GOOD_NAME` (whitespace, quotes, punctuation, keep Armenian + Latin + digits + `/` etc.) and normalizes `ADG_CODE` to integers. Optional columns **`BRAND`** and **`INDUSTRY`** are recognized case-insensitively (`brand`, `Industry`, …); if missing, empty columns are added. Output column order: `GOOD_NAME`, `BRAND`, `INDUSTRY`, `ADG_CODE`, then any other columns.
+
+```bash
+python clean_brand_task.py
+python clean_brand_task.py --input brand_task.xlsx --output brand_task_cleaned.xlsx
+python clean_brand_task.py --drop-invalid-code   # drop rows with bad codes
+```
+
+Train on the cleaned file: `python train_bilstm.py --data brand_task_cleaned.xlsx` (training still uses `GOOD_NAME` → `ADG_CODE` only; extra columns are kept in the file for analysis and for `predict.py --code`).
+
+### Rich cleaning + brand/industry (`clean_data.py`)
+
+Runs the dictionary-based brand extraction and industry rules; reads **`brand_task.xlsx`** (or **`brand_task.csv`** if the xlsx is missing) and writes **`cleaned_product_data_with_brands.csv`** with columns: `cleaned_product_name`, `adg_code`, `brand`, `industry`.
+
+```bash
+python clean_data.py
+```
+
+To use with `train_bilstm.py`, either rename columns to `GOOD_NAME` / `ADG_CODE` or point training at a small wrapper that reads this CSV.
+
+This pipeline is separate from `text_language.normalize_good_name` used inside `train_bilstm.py` at load time — use one strategy consistently (either clean the sheet first and relax duplicate logic, or rely on in-loader normalization only).
+
 ## Train
 
 Default is a character BiLSTM on CPU or GPU if PyTorch sees CUDA.
